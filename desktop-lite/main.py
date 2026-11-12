@@ -1,5 +1,6 @@
 """Offline neural TTS for Bengali and English (MMS VITS)."""
 import threading
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
@@ -12,6 +13,7 @@ class Lite(tk.Tk):
         self.title("Bangla Voice Studio Lite - Offline Neural Voice")
         self.geometry("730x590")
         self.language = tk.StringVar(value="বাংলা")
+        self.delivery = tk.StringVar(value="Inspirational")
         self.status = tk.StringVar(value="Ready. First generation downloads an open-source model.")
         self.models = {}
         self.audio = None
@@ -21,6 +23,8 @@ class Lite(tk.Tk):
         ttk.Label(root, text="Bangla Voice Studio Lite", font=("Segoe UI", 20, "bold")).pack(anchor="w")
         ttk.Label(root, text="বাংলা / English - Neural Text to Speech").pack(anchor="w", pady=8)
         ttk.Combobox(root, textvariable=self.language, values=list(MODELS), state="readonly").pack(fill="x", pady=8)
+        ttk.Label(root, text="Narration pacing (pauses, not true emotion synthesis)").pack(anchor="w")
+        ttk.Combobox(root, textvariable=self.delivery, values=["Inspirational", "Calm", "Neutral"], state="readonly").pack(fill="x", pady=6)
         self.input = tk.Text(root, height=13, wrap="word", font=("Segoe UI", 12))
         self.input.pack(fill="both", expand=True, pady=8)
         self.input.insert("1.0", "জীবনে সফল হতে হলে সব সময় বড় কিছু দিয়ে শুরু করতে হয় না।")
@@ -41,9 +45,9 @@ class Lite(tk.Tk):
         lang = self.language.get()
         self.generate_btn.config(state="disabled")
         self.status.set("Loading neural voice model; first run may take several minutes...")
-        threading.Thread(target=self.worker, args=(lang, text), daemon=True).start()
+        threading.Thread(target=self.worker, args=(lang, text, self.delivery.get()), daemon=True).start()
 
-    def worker(self, lang, text):
+    def worker(self, lang, text, delivery):
         try:
             import torch
             from transformers import VitsModel, AutoTokenizer
@@ -55,11 +59,25 @@ class Lite(tk.Tk):
                 self.models[model_id] = (tokenizer, model)
             tokenizer, model = self.models[model_id]
             self.set_status("Generating audio on CPU...")
-            inputs = tokenizer(text, return_tensors="pt")
-            with torch.no_grad():
-                waveform = model(**inputs).waveform[0].cpu().numpy()
-            self.audio = waveform
-            self.sample_rate = model.config.sampling_rate
+            import numpy as np
+            clauses = re.findall(r"[^।.!?\\n]+[।.!?]?", text)
+            clauses = [c.strip() for c in clauses if c.strip()]
+            if not clauses:
+                raise ValueError("No readable sentences found")
+            rate = int(model.config.sampling_rate)
+            pause_ms = {"Inspirational": 480, "Calm": 600, "Neutral": 220}[delivery]
+            pieces = []
+            for i, clause in enumerate(clauses):
+                self.set_status(f"Generating sentence {i + 1}/{len(clauses)}...")
+                inputs = tokenizer(clause, return_tensors="pt")
+                with torch.no_grad():
+                    chunk = model(**inputs).waveform[0].cpu().numpy()
+                pieces.append(chunk)
+                if i < len(clauses) - 1:
+                    extra = 200 if clause.endswith(("!", "?", "।")) and delivery == "Inspirational" else 0
+                    pieces.append(np.zeros(int(rate * (pause_ms + extra) / 1000), dtype=np.float32))
+            self.audio = np.concatenate(pieces)
+            self.sample_rate = rate
             self.set_status("Audio ready. Click Save WAV.")
         except Exception as exc:
             self.set_status("Error: " + str(exc))
